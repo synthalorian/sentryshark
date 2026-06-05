@@ -6,12 +6,12 @@ Self-hosted AI code review bot. Rust + Axum. No cloud, no API keys.
 
 ## v0.1.0 — Wire the Core (Now)
 
-- [ ] Connect `github.rs` webhook handler to `review.rs` + `llm.rs`
-- [ ] Implement `ReviewEngine::clone_and_diff` with real git operations
-- [ ] Add GitHub webhook HMAC-SHA256 signature verification
-- [ ] Add GitLab webhook secret token verification
-- [ ] Wire LLM client to send diffs and post review comments
-- [ ] Write integration tests with mock webhook payloads
+- [x] Connect `github.rs` webhook handler to `review.rs` + `llm.rs`
+- [x] Implement `ReviewEngine::clone_and_diff` with real git operations
+- [x] Add GitHub webhook HMAC-SHA256 signature verification
+- [x] Add GitLab webhook secret token verification
+- [x] Wire LLM client to send diffs and post review comments
+- [x] Write integration tests with mock webhook payloads
 
 ## v0.2.0 — Smart Reviews
 
