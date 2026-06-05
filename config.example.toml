@@ -1,0 +1,19 @@
+[server]
+host = "0.0.0.0"
+port = 3000
+
+[github]
+webhook_secret = "your-webhook-secret"
+app_id = "123456"
+private_key_path = "/path/to/private-key.pem"
+
+[gitlab]
+webhook_secret = "your-webhook-secret"
+access_token = "glpat-xxxxxxxx"
+
+[llm]
+provider = "llamacpp"
+base_url = "http://localhost:8080"
+model = "codellama-34b"
+max_tokens = 4096
+temperature = 0.1

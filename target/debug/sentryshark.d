@@ -1,0 +1,1 @@
+/home/synth/projects/sentryshark/target/debug/sentryshark: /home/synth/projects/sentryshark/src/config.rs /home/synth/projects/sentryshark/src/github.rs /home/synth/projects/sentryshark/src/gitlab.rs /home/synth/projects/sentryshark/src/llm.rs /home/synth/projects/sentryshark/src/main.rs /home/synth/projects/sentryshark/src/review.rs
