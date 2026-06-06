@@ -4,24 +4,52 @@ use tracing::{debug, info};
 pub struct DiffFilter {
     lockfile_patterns: Vec<Regex>,
     generated_patterns: Vec<Regex>,
+    include_patterns: Vec<Regex>,
+    exclude_patterns: Vec<Regex>,
     enabled: bool,
 }
 
 impl DiffFilter {
-    pub fn new(lockfile_patterns: &[String], generated_patterns: &[String], enabled: bool) -> Self {
+    pub fn new(
+        lockfile_patterns: &[String],
+        generated_patterns: &[String],
+        enabled: bool,
+    ) -> Self {
+        Self::with_patterns(
+            lockfile_patterns,
+            generated_patterns,
+            &[],
+            &[],
+            enabled,
+        )
+    }
+
+    pub fn with_patterns(
+        lockfile_patterns: &[String],
+        generated_patterns: &[String],
+        include_patterns: &[String],
+        exclude_patterns: &[String],
+        enabled: bool,
+    ) -> Self {
         let lockfile_patterns = compile_patterns(lockfile_patterns);
         let generated_patterns = compile_patterns(generated_patterns);
+        let include_patterns = compile_patterns(include_patterns);
+        let exclude_patterns = compile_patterns(exclude_patterns);
         
         info!(
-            "DiffFilter initialized with {} lockfile and {} generated patterns (enabled={})",
+            "DiffFilter initialized with {} lockfile, {} generated, {} include, {} exclude patterns (enabled={})",
             lockfile_patterns.len(),
             generated_patterns.len(),
+            include_patterns.len(),
+            exclude_patterns.len(),
             enabled
         );
         
         Self {
             lockfile_patterns,
             generated_patterns,
+            include_patterns,
+            exclude_patterns,
             enabled,
         }
     }
@@ -91,12 +119,29 @@ impl DiffFilter {
     fn should_skip(&self, file_path: &str) -> bool {
         let path = file_path.to_lowercase();
         
+        // If include patterns are specified, only include matching files
+        if !self.include_patterns.is_empty() {
+            let included = self.include_patterns.iter().any(|p| p.is_match(&path));
+            if !included {
+                return true;
+            }
+        }
+        
+        // Check exclude patterns
+        for pattern in &self.exclude_patterns {
+            if pattern.is_match(&path) {
+                return true;
+            }
+        }
+        
+        // Check lockfile patterns
         for pattern in &self.lockfile_patterns {
             if pattern.is_match(&path) {
                 return true;
             }
         }
         
+        // Check generated patterns
         for pattern in &self.generated_patterns {
             if pattern.is_match(&path) {
                 return true;
@@ -175,7 +220,7 @@ mod tests {
 +++ b/Cargo.lock
 @@ -1,5 +1,5 @@
  version = 1
- 
+
 diff --git a/src/main.rs b/src/main.rs
 --- a/src/main.rs
 +++ b/src/main.rs
@@ -231,5 +276,92 @@ diff --git a/src/app.js b/src/app.js
         assert_eq!(glob_to_regex("*.lock"), "^.*\\.lock$");
         assert_eq!(glob_to_regex("dist/"), "^dist/$");
         assert_eq!(glob_to_regex("Cargo.lock"), "^Cargo\\.lock$");
+    }
+
+    #[test]
+    fn test_include_patterns() {
+        let filter = DiffFilter::with_patterns(
+            &[],
+            &[],
+            &["src/*".to_string()],
+            &[],
+            true,
+        );
+
+        let diff = r#"diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,5 +1,5 @@
+ fn main() {}
+diff --git a/tests/test.rs b/tests/test.rs
+--- a/tests/test.rs
++++ b/tests/test.rs
+@@ -1,5 +1,5 @@
+ fn test() {}
+"#;
+
+        let filtered = filter.filter_diff(diff);
+        assert!(filtered.contains("src/main.rs"), "src/main.rs should be kept");
+        assert!(!filtered.contains("tests/test.rs"), "tests/test.rs should be filtered out");
+    }
+
+    #[test]
+    fn test_exclude_patterns() {
+        let filter = DiffFilter::with_patterns(
+            &[],
+            &[],
+            &[],
+            &["tests/*".to_string(), "*.test.js".to_string()],
+            true,
+        );
+
+        let diff = r#"diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,5 +1,5 @@
+ fn main() {}
+diff --git a/tests/test.rs b/tests/test.rs
+--- a/tests/test.rs
++++ b/tests/test.rs
+@@ -1,5 +1,5 @@
+ fn test() {}
+"#;
+
+        let filtered = filter.filter_diff(diff);
+        assert!(filtered.contains("src/main.rs"), "src/main.rs should be kept");
+        assert!(!filtered.contains("tests/test.rs"), "tests/test.rs should be filtered out");
+    }
+
+    #[test]
+    fn test_include_and_exclude_combined() {
+        let filter = DiffFilter::with_patterns(
+            &[],
+            &[],
+            &["src/*".to_string()],
+            &["src/generated.rs".to_string()],
+            true,
+        );
+
+        let diff = r#"diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,5 +1,5 @@
+ fn main() {}
+diff --git a/src/generated.rs b/src/generated.rs
+--- a/src/generated.rs
++++ b/src/generated.rs
+@@ -1,5 +1,5 @@
+ // generated
+diff --git a/lib/lib.rs b/lib/lib.rs
+--- a/lib/lib.rs
++++ b/lib/lib.rs
+@@ -1,5 +1,5 @@
+ pub fn lib() {}
+"#;
+
+        let filtered = filter.filter_diff(diff);
+        assert!(filtered.contains("src/main.rs"), "src/main.rs should be kept");
+        assert!(!filtered.contains("src/generated.rs"), "src/generated.rs should be excluded");
+        assert!(!filtered.contains("lib/lib.rs"), "lib/lib.rs should not be included");
     }
 }

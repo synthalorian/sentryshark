@@ -33,9 +33,11 @@ impl ReviewEngine {
 
     pub fn from_diff_filter_config(diff_filter_config: &crate::config::DiffFilterConfig) -> Self {
         let diff_filter = if diff_filter_config.enabled {
-            Some(DiffFilter::new(
+            Some(DiffFilter::with_patterns(
                 &diff_filter_config.lockfile_patterns,
                 &diff_filter_config.generated_patterns,
+                &diff_filter_config.include_patterns,
+                &diff_filter_config.exclude_patterns,
                 true,
             ))
         } else {

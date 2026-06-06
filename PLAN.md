@@ -29,15 +29,35 @@ Self-hosted AI code review bot. Rust + Axum. No cloud, no API keys.
 - [x] Web dashboard for review stats
 - [x] Docker compose with llama.cpp sidecar
 
-## v0.4.0 — Observability & Polish (Current)
+## v0.4.0 — Observability & Polish (Complete)
 
-- [ ] Metrics endpoint (/metrics) with Prometheus-compatible output
-- [ ] Webhook rate limiting middleware
-- [ ] Config validation on startup with helpful error messages
-- [ ] Structured review metrics (latency, error rates, per-repo stats)
-- [ ] Code quality: remove AppConfig duplication in handlers
-- [ ] Expanded integration tests for batch processing and metrics
-- [ ] Health check endpoint returns detailed status (DB, LLM connectivity)
+- [x] Metrics endpoint (/metrics) with Prometheus-compatible output
+- [x] Webhook rate limiting middleware
+- [x] Config validation on startup with helpful error messages
+- [x] Structured review metrics (latency, error rates, per-repo stats)
+- [x] Code quality: remove AppConfig duplication in handlers
+- [x] Expanded integration tests for batch processing and metrics
+- [x] Health check endpoint returns detailed status (DB, LLM connectivity)
+
+## v0.5.0 — Advanced Review Features
+
+- [x] Review rule engine with custom rule definitions (YAML/TOML)
+- [x] Severity levels for findings (critical, warning, info)
+- [x] Auto-approve trivial PRs (docs, lockfile-only, whitespace)
+- [x] Review templates for different project types (Rust, Python, JS)
+- [x] Diff hunk filtering by file type and path patterns
+- [x] Review history search and filtering via dashboard
+- [x] Webhook retry logic with exponential backoff
+
+## v0.6.0 — Scale & Reliability
+
+- [x] Async review queue with worker pool (not inline)
+- [x] Review job persistence in SQLite (survive restarts)
+- [x] Concurrent review limits per repository
+- [x] Review result caching (skip re-reviewing identical diffs)
+- [x] Graceful shutdown with in-flight review completion
+- [x] Structured logging with tracing (spans for each review)
+- [x] Benchmark suite for review latency under load
 
 ## v1.0.0 — Ship It
 
@@ -55,7 +75,7 @@ Self-hosted AI code review bot. Rust + Axum. No cloud, no API keys.
 GitHub/GitLab webhook → Axum → Verify sig → Rate limit → Clone repo → Extract diff
                                                                   ↓
 Post review ← Format response ← LLM response ← Send to local LLM
-     ↓
+      ↓
 SQLite DB ← Metrics endpoint ← Dashboard
 ```
 
@@ -112,4 +132,4 @@ docker-compose up -d
 
 ---
 
-*This is the wave.* 🦈
+*This is the wave.* \u{1f988}

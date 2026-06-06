@@ -4,7 +4,7 @@ use axum::{
     http::{StatusCode, HeaderMap},
 };
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn, error};
+use tracing::{info, warn, error, instrument};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -13,7 +13,10 @@ use tokio::sync::Mutex;
 
 use crate::{AppState, review::{ReviewEngine, CommitRange}, llm::LlmClient};
 use crate::config::GitHubConfig;
-use crate::inline_comments::ReviewVerdict;
+use crate::inline_comments::{ReviewVerdict, SeverityLevel, ReviewParser};
+use crate::retry::{retry_with_backoff, RetryConfig};
+use crate::auto_approve::{AutoApprover, auto_approve_message};
+use crate::cache::ReviewCache;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -292,6 +295,22 @@ pub async fn webhook_handler(
     let use_batching = batching_config.enabled;
     let batch_timeout = Duration::from_secs(batching_config.timeout_seconds);
 
+    let auto_approve_config = crate::auto_approve::AutoApproveConfig {
+        enabled: state.config.auto_approve_config().enabled,
+        docs_patterns: state.config.auto_approve_config().docs_patterns.clone(),
+        skip_lockfiles: state.config.auto_approve_config().skip_lockfiles,
+        skip_whitespace: state.config.auto_approve_config().skip_whitespace,
+    };
+
+    let cache = if state.config.cache_config().enabled {
+        Some(ReviewCache::new(
+            state.database.clone(),
+            state.config.cache_config().ttl_hours,
+        ))
+    } else {
+        None
+    };
+
     tokio::spawn(async move {
         info!("Processing GitHub PR #{}: {}", pr_number, pr_title);
 
@@ -345,6 +364,65 @@ pub async fn webhook_handler(
                 return;
             }
 
+            // Check for trivial changes and auto-approve
+            if let Some(reason) = AutoApprover::is_trivial(&diff, &auto_approve_config) {
+                info!("Auto-approving PR #{}: {}", pr_number, reason);
+                let body = auto_approve_message(&reason);
+                let config = GitHubConfig {
+                    webhook_secret: String::new(),
+                    app_id: github_app_id.clone(),
+                    private_key_path: github_key_path.clone(),
+                    use_app_auth: github_config.use_app_auth,
+                    installation_id: github_config.installation_id,
+                };
+
+                if let Err(e) = post_review_comment(&repo_name, pr_number, &body, &config).await {
+                    error!("Failed to post auto-approve comment: {}", e);
+                }
+
+                metrics.record_auto_approve();
+                return;
+            }
+
+            // Check cache before LLM call
+            if let Some(ref cache) = cache {
+                match cache.get(&diff).await {
+                    Ok(Some(cached_review)) => {
+                        info!("Using cached review for PR #{}", pr_number);
+                        metrics.record_cache_hit();
+                        let config = GitHubConfig {
+                            webhook_secret: String::new(),
+                            app_id: github_app_id.clone(),
+                            private_key_path: github_key_path.clone(),
+                            use_app_auth: github_config.use_app_auth,
+                            installation_id: github_config.installation_id,
+                        };
+                        let db = state.database.clone();
+                        let verdict = format!("{:?}", cached_review.verdict);
+                        if let Err(e) = post_review(
+                            &repo_name,
+                            pr_number,
+                            &head_sha,
+                            &cached_review,
+                            &config,
+                            Some(&db),
+                        ).await {
+                            error!("Failed to post cached review: {}", e);
+                            metrics.record_review_failed();
+                        } else {
+                            metrics.record_review(&verdict, &repo_name, Some(review_start));
+                        }
+                        return;
+                    }
+                    Ok(None) => {
+                        metrics.record_cache_miss();
+                    }
+                    Err(e) => {
+                        warn!("Cache lookup failed: {}", e);
+                    }
+                }
+            }
+
             let review = match llm.review_code(&diff).await {
                 Ok(r) => r,
                 Err(e) => {
@@ -353,6 +431,13 @@ pub async fn webhook_handler(
                     return;
                 }
             };
+
+            // Cache the result
+            if let Some(ref cache) = cache {
+                if let Err(e) = cache.set(&diff, &review).await {
+                    warn!("Failed to cache review: {}", e);
+                }
+            }
 
             let config = GitHubConfig {
                 webhook_secret: String::new(),
@@ -438,6 +523,7 @@ async fn process_batch_review(
     }
 }
 
+#[instrument(skip(review, config, database))]
 pub async fn post_review(
     repo: &str,
     pr_number: u64,
@@ -458,6 +544,12 @@ pub async fn post_review(
 
     if let Some(db) = database {
         let verdict = format!("{:?}", review.verdict);
+        let critical_count = review.inline_comments.iter()
+            .filter(|c| matches!(c.severity, SeverityLevel::Critical)).count() as i64;
+        let warning_count = review.inline_comments.iter()
+            .filter(|c| matches!(c.severity, SeverityLevel::Warning)).count() as i64;
+        let info_count = review.inline_comments.iter()
+            .filter(|c| matches!(c.severity, SeverityLevel::Info)).count() as i64;
         let _ = db.save_review(
             repo,
             pr_number as i64,
@@ -466,6 +558,9 @@ pub async fn post_review(
             &verdict,
             &review.summary,
             review.inline_comments.len() as i64,
+            critical_count,
+            warning_count,
+            info_count,
         ).await;
     }
 
@@ -492,8 +587,9 @@ async fn post_pull_request_review(
     };
 
     let comments: Vec<GitHubReviewComment> = review.inline_comments.iter().map(|c| {
+        let severity_label = ReviewParser::format_severity_label(&c.severity);
         GitHubReviewComment {
-            body: c.body.clone(),
+            body: format!("{} {}", severity_label, c.body),
             path: c.file_path.clone(),
             line: c.line,
             side: "RIGHT".to_string(),
@@ -501,7 +597,7 @@ async fn post_pull_request_review(
     }).collect();
 
     let review_request = GitHubPullRequestReview {
-        body: format!("🦈 **SentryShark Code Review**\n\n{}", review.summary),
+        body: format!("\u{1f988} **SentryShark Code Review**\n\n{}", review.summary),
         event: event.to_string(),
         comments,
     };
@@ -560,15 +656,15 @@ async fn post_issue_comment(
     Ok(())
 }
 
-fn format_summary_body(review: &crate::inline_comments::StructuredReview) -> String {
+pub fn format_summary_body(review: &crate::inline_comments::StructuredReview) -> String {
     let verdict_emoji = match review.verdict {
-        ReviewVerdict::Approve => "✅",
-        ReviewVerdict::RequestChanges => "❌",
-        ReviewVerdict::Comment => "💬",
+        ReviewVerdict::Approve => "\u{2705}",
+        ReviewVerdict::RequestChanges => "\u{274c}",
+        ReviewVerdict::Comment => "\u{1f4ac}",
     };
 
     let mut body = format!(
-        "🦈 **SentryShark Code Review**\n\n{} **Verdict:** {:?}\n\n{}",
+        "\u{1f988} **SentryShark Code Review**\n\n{} **Verdict:** {:?}\n\n{}",
         verdict_emoji,
         review.verdict,
         review.summary
@@ -577,10 +673,12 @@ fn format_summary_body(review: &crate::inline_comments::StructuredReview) -> Str
     if !review.inline_comments.is_empty() {
         body.push_str("\n\n**Inline Comments:**\n");
         for comment in &review.inline_comments {
+            let severity_label = ReviewParser::format_severity_label(&comment.severity);
             body.push_str(&format!(
-                "- `{}:{}` - {}\n",
+                "- `{}:{}` - {} {}\n",
                 comment.file_path,
                 comment.line,
+                severity_label,
                 comment.body.lines().next().unwrap_or("")
             ));
         }
@@ -589,15 +687,19 @@ fn format_summary_body(review: &crate::inline_comments::StructuredReview) -> Str
     body
 }
 
+#[instrument(skip(config))]
 pub async fn post_review_comment(
     repo: &str,
     pr_number: u64,
     body: &str,
     config: &GitHubConfig,
 ) -> anyhow::Result<()> {
-    let auth = GitHubAuth::new(config.clone());
-    let token = auth.get_token().await?;
-    post_issue_comment(repo, pr_number, body, &token).await
+    let retry_config = RetryConfig::default();
+    retry_with_backoff(&retry_config, "post GitHub comment", || async {
+        let auth = GitHubAuth::new(config.clone());
+        let token = auth.get_token().await?;
+        post_issue_comment(repo, pr_number, body, &token).await
+    }).await
 }
 
 #[cfg(test)]
@@ -632,14 +734,16 @@ mod tests {
                     file_path: "src/main.rs".to_string(),
                     line: 42,
                     body: "Consider error handling".to_string(),
+                    severity: SeverityLevel::Warning,
                 }
             ],
         };
 
         let body = format_summary_body(&review);
-        assert!(body.contains("✅"));
+        assert!(body.contains("\u{2705}"));
         assert!(body.contains("Approve"));
         assert!(body.contains("src/main.rs:42"));
+        assert!(body.contains("Warning"));
     }
 
     #[test]
@@ -651,7 +755,7 @@ mod tests {
         };
 
         let body = format_summary_body(&review);
-        assert!(body.contains("❌"));
+        assert!(body.contains("\u{274c}"));
         assert!(body.contains("RequestChanges"));
     }
 

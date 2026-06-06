@@ -1,3 +1,5 @@
+pub mod auto_approve;
+pub mod cache;
 pub mod config;
 pub mod dashboard;
 pub mod db;
@@ -7,8 +9,13 @@ pub mod gitlab;
 pub mod inline_comments;
 pub mod llm;
 pub mod metrics;
+pub mod queue;
 pub mod rate_limit;
+pub mod retry;
 pub mod review;
+pub mod rule_engine;
+pub mod shutdown;
+pub mod templates;
 
 use std::sync::Arc;
 use config::AppConfig;

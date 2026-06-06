@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
-use tracing::{info, debug};
+use tracing::{info, debug, instrument};
 
 use crate::config::ReviewConfig;
 use crate::inline_comments::{ReviewParser, StructuredReview};
+use crate::rule_engine::RuleEngine;
+use crate::templates::{ProjectTemplate, TemplateEngine};
 
 #[derive(Debug, Serialize)]
 pub struct ChatRequest {
@@ -35,6 +37,8 @@ pub struct LlmClient {
     max_tokens: u32,
     temperature: f32,
     review_config: ReviewConfig,
+    rule_engine: Option<RuleEngine>,
+    template: ProjectTemplate,
 }
 
 impl LlmClient {
@@ -52,9 +56,22 @@ impl LlmClient {
             max_tokens,
             temperature,
             review_config,
+            rule_engine: None,
+            template: ProjectTemplate::Generic,
         }
     }
 
+    pub fn with_rule_engine(mut self, rule_engine: RuleEngine) -> Self {
+        self.rule_engine = Some(rule_engine);
+        self
+    }
+
+    pub fn with_template(mut self, template: ProjectTemplate) -> Self {
+        self.template = template;
+        self
+    }
+
+    #[instrument(skip(self, diff), fields(model = %self.model))]
     pub async fn review_code(&self,
         diff: &str,
     ) -> anyhow::Result<StructuredReview> {
@@ -99,10 +116,26 @@ impl LlmClient {
         Ok(structured)
     }
 
-    fn build_prompt(&self, diff: &str) -> String {
+    pub fn build_prompt(&self, diff: &str) -> String {
         let mut prompt = String::new();
         
         prompt.push_str("You are a senior code reviewer. Review the following diff and provide structured feedback.\n\n");
+        
+        // Add template-specific guidelines
+        let template_prompt = TemplateEngine::prompt_additions(&self.template);
+        if !template_prompt.is_empty() {
+            prompt.push_str(&template_prompt);
+            prompt.push('\n');
+        }
+        
+        // Add custom rules
+        if let Some(ref engine) = self.rule_engine {
+            let rules_prompt = engine.format_rules_for_prompt();
+            if !rules_prompt.is_empty() {
+                prompt.push_str(&rules_prompt);
+                prompt.push('\n');
+            }
+        }
         
         // Add enabled review rules
         prompt.push_str("Focus areas:\n");
@@ -134,6 +167,7 @@ impl LlmClient {
             prompt.push_str("For each issue found, include an inline comment:\n\n");
             prompt.push_str("FILE: [file path]\n");
             prompt.push_str("LINE: [line number]\n");
+            prompt.push_str("SEVERITY: [CRITICAL | WARNING | INFO]\n");
             prompt.push_str("COMMENT: [specific, actionable feedback]\n\n");
             prompt.push_str("Include only inline comments for actual issues - skip praise or minor suggestions.\n\n");
         }
@@ -167,6 +201,7 @@ mod tests {
             maintainability: false,
             inline_comments: true,
             summary_comment: true,
+            template: None,
         };
 
         let client = LlmClient::new(
@@ -187,6 +222,70 @@ mod tests {
         assert!(prompt.contains("VERDICT:"));
         assert!(prompt.contains("FILE:"));
         assert!(prompt.contains("LINE:"));
+        assert!(prompt.contains("SEVERITY:"));
+    }
+
+    #[test]
+    fn test_build_prompt_with_template() {
+        let config = ReviewConfig {
+            security: false,
+            style: false,
+            performance: false,
+            correctness: true,
+            maintainability: false,
+            inline_comments: true,
+            summary_comment: true,
+            template: None,
+        };
+
+        let client = LlmClient::new(
+            "http://localhost:8080".to_string(),
+            "test".to_string(),
+            100,
+            0.1,
+            config,
+        ).with_template(ProjectTemplate::Rust);
+
+        let prompt = client.build_prompt("diff test");
+        assert!(prompt.contains("unwrap()"));
+        assert!(prompt.contains("unsafe"));
+    }
+
+    #[test]
+    fn test_build_prompt_with_rules() {
+        let config = ReviewConfig {
+            security: false,
+            style: false,
+            performance: false,
+            correctness: false,
+            maintainability: false,
+            inline_comments: true,
+            summary_comment: true,
+            template: None,
+        };
+
+        let mut rule_engine = RuleEngine::new();
+        rule_engine.add_rules(vec![
+            crate::rule_engine::ReviewRule {
+                name: "no_panic".to_string(),
+                description: "Avoid panic".to_string(),
+                pattern: r"panic!".to_string(),
+                severity: crate::rule_engine::SeverityLevel::Critical,
+                message: "Don't panic".to_string(),
+            },
+        ]);
+
+        let client = LlmClient::new(
+            "http://localhost:8080".to_string(),
+            "test".to_string(),
+            100,
+            0.1,
+            config,
+        ).with_rule_engine(rule_engine);
+
+        let prompt = client.build_prompt("diff test");
+        assert!(prompt.contains("no_panic"));
+        assert!(prompt.contains("Avoid panic"));
     }
 
     #[test]
@@ -199,6 +298,7 @@ mod tests {
             maintainability: false,
             inline_comments: false,
             summary_comment: true,
+            template: None,
         };
 
         let client = LlmClient::new(

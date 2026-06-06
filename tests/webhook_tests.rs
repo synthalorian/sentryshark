@@ -47,11 +47,14 @@ fn create_test_app() -> Router {
             maintainability: true,
             inline_comments: true,
             summary_comment: true,
+            template: None,
         }),
         diff_filter: Some(DiffFilterConfig {
             enabled: true,
             lockfile_patterns: vec!["Cargo.lock".to_string()],
             generated_patterns: vec!["*.min.js".to_string()],
+            include_patterns: vec![],
+            exclude_patterns: vec![],
         }),
         batching: Some(BatchingConfig {
             enabled: false,
@@ -60,6 +63,7 @@ fn create_test_app() -> Router {
         }),
         database: Some(DatabaseConfig::default()),
         dashboard: Some(DashboardConfig::default()),
+        ..Default::default()
     };
 
     let database = Arc::new(Database::new(":memory:").unwrap());
@@ -348,6 +352,7 @@ fn test_config_validation_valid() {
         batching: Some(BatchingConfig::default()),
         database: Some(DatabaseConfig::default()),
         dashboard: Some(DashboardConfig::default()),
+        ..Default::default()
     };
 
     assert!(config.validate().is_ok());
@@ -380,6 +385,7 @@ fn test_config_validation_empty_base_url() {
         batching: Some(BatchingConfig::default()),
         database: Some(DatabaseConfig::default()),
         dashboard: Some(DashboardConfig::default()),
+        ..Default::default()
     };
 
     let result = config.validate();
@@ -409,6 +415,7 @@ fn test_config_validation_no_provider() {
         batching: Some(BatchingConfig::default()),
         database: Some(DatabaseConfig::default()),
         dashboard: Some(DashboardConfig::default()),
+        ..Default::default()
     };
 
     let result = config.validate();
@@ -444,6 +451,7 @@ fn test_config_validation_invalid_temperature() {
         batching: Some(BatchingConfig::default()),
         database: Some(DatabaseConfig::default()),
         dashboard: Some(DashboardConfig::default()),
+        ..Default::default()
     };
 
     let result = config.validate();

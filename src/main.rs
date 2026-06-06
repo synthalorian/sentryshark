@@ -8,12 +8,13 @@ use axum::{
 use std::net::SocketAddr;
 use std::sync::Arc;
 use serde::Serialize;
-use tracing::info;
+use tracing::{info, instrument};
 
 use sentryshark::config::AppConfig;
 use sentryshark::db::Database;
 use sentryshark::metrics::Metrics;
 use sentryshark::rate_limit::{extract_client_key, RateLimiter};
+use sentryshark::shutdown::{wait_for_shutdown, ShutdownHandle};
 use sentryshark::AppState;
 
 #[derive(Serialize)]
@@ -26,13 +27,23 @@ struct HealthStatus {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
-
     let config = Arc::new(AppConfig::load()?);
+    let logging_config = config.logging_config();
+
+    if logging_config.json_format {
+        tracing_subscriber::fmt()
+            .json()
+            .with_target(true)
+            .init();
+    } else {
+        tracing_subscriber::fmt::init();
+    }
+
     let db_path = config.database_config().path.clone();
     let database = Arc::new(Database::new(&db_path)?);
     let metrics = Arc::new(Metrics::new());
     let rate_limiter = Arc::new(RateLimiter::new(60, 60));
+    let shutdown = ShutdownHandle::new();
 
     let state = AppState {
         config,
@@ -52,19 +63,27 @@ async fn main() -> anyhow::Result<()> {
     if dashboard_enabled {
         app = app
             .route("/dashboard", get(sentryshark::dashboard::dashboard_handler))
-            .route("/dashboard/stats", get(sentryshark::dashboard::stats_api_handler));
-        info!("📊 Dashboard enabled at /dashboard");
+            .route("/dashboard/stats", get(sentryshark::dashboard::stats_api_handler))
+            .route("/dashboard/api/search", get(sentryshark::dashboard::search_api_handler));
+        info!("\u{1f4ca} Dashboard enabled at /dashboard");
     }
 
-    let app = app.with_state(state);
+    let app = app.with_state(state.clone());
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
-    info!("🦈 SentryShark v0.4.0 listening on {}", listener.local_addr()?);
+    info!("\u{1f988} SentryShark v0.6.0 listening on {}", listener.local_addr()?);
+
+    let shutdown_clone = shutdown.clone();
+    tokio::spawn(async move {
+        wait_for_shutdown().await;
+        shutdown_clone.shutdown();
+    });
 
     axum::serve(listener, app).await?;
     Ok(())
 }
 
+#[instrument(skip(state, headers, body), fields(provider = "github"))]
 async fn github_webhook(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     state: axum::extract::State<AppState>,
@@ -83,6 +102,7 @@ async fn github_webhook(
     sentryshark::github::webhook_handler(state, headers, body).await
 }
 
+#[instrument(skip(state, headers, body), fields(provider = "gitlab"))]
 async fn gitlab_webhook(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     state: axum::extract::State<AppState>,
@@ -110,7 +130,7 @@ async fn health_check(axum::extract::State(state): axum::extract::State<AppState
 
     Json(HealthStatus {
         status: "healthy".to_string(),
-        version: "0.4.0".to_string(),
+        version: "0.6.0".to_string(),
         database: db_status.to_string(),
         config_loaded: true,
     })

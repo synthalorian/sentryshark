@@ -1,10 +1,30 @@
+use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub enum SeverityLevel {
+    Critical,
+    Warning,
+    #[default]
+    Info,
+}
+
+impl std::fmt::Display for SeverityLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SeverityLevel::Critical => write!(f, "critical"),
+            SeverityLevel::Warning => write!(f, "warning"),
+            SeverityLevel::Info => write!(f, "info"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InlineComment {
     pub file_path: String,
     pub line: u32,
     pub body: String,
+    pub severity: SeverityLevel,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -31,6 +51,7 @@ impl ReviewParser {
         
         let mut current_file: Option<String> = None;
         let mut current_line: Option<u32> = None;
+        let mut current_severity = SeverityLevel::Info;
         let mut current_comment = String::new();
         let mut in_summary = false;
         
@@ -77,10 +98,12 @@ impl ReviewParser {
                             file_path: file,
                             line: line_num,
                             body: current_comment.trim().to_string(),
+                            severity: current_severity.clone(),
                         });
                     }
                 }
                 current_comment.clear();
+                current_severity = SeverityLevel::Info;
                 current_file = Some(trimmed[5..].trim().to_string());
                 continue;
             }
@@ -91,6 +114,17 @@ impl ReviewParser {
                 if current_line.is_none() {
                     warn!("Failed to parse line number: {}", line_str);
                 }
+                continue;
+            }
+
+            if trimmed.to_uppercase().starts_with("SEVERITY:") {
+                let sev_str = trimmed[9..].trim().to_uppercase();
+                current_severity = match sev_str.as_str() {
+                    "CRITICAL" => SeverityLevel::Critical,
+                    "WARNING" => SeverityLevel::Warning,
+                    "WARN" => SeverityLevel::Warning,
+                    _ => SeverityLevel::Info,
+                };
                 continue;
             }
             
@@ -114,6 +148,7 @@ impl ReviewParser {
                     file_path: file,
                     line: line_num,
                     body: current_comment.trim().to_string(),
+                    severity: current_severity,
                 });
             }
         }
@@ -151,6 +186,19 @@ impl ReviewParser {
         output.push_str(&format!("\n\n**Verdict:** {:?}", structured.verdict));
         
         output
+    }
+
+    pub fn format_severity_emoji(severity: &SeverityLevel) -> &'static str {
+        match severity {
+            SeverityLevel::Critical => "\u{1f534}",
+            SeverityLevel::Warning => "\u{1f7e1}",
+            SeverityLevel::Info => "\u{1f535}",
+        }
+    }
+
+    pub fn format_severity_label(severity: &SeverityLevel) -> String {
+        let emoji = Self::format_severity_emoji(severity);
+        format!("{} {:?}:", emoji, severity)
     }
 }
 
@@ -193,6 +241,42 @@ COMMENT: Good documentation
         assert_eq!(review.inline_comments[0].file_path, "src/main.rs");
         assert_eq!(review.inline_comments[0].line, 42);
         assert!(review.inline_comments[0].body.contains("unwrap_or_default"));
+        assert_eq!(review.inline_comments[0].severity, SeverityLevel::Info);
+    }
+
+    #[test]
+    fn test_parse_severity_levels() {
+        let output = r#"VERDICT: COMMENT
+SUMMARY: Issues found
+
+FILE: src/main.rs
+LINE: 42
+SEVERITY: CRITICAL
+COMMENT: Memory safety issue
+
+FILE: src/lib.rs
+LINE: 10
+SEVERITY: WARNING
+COMMENT: Consider refactoring
+
+FILE: src/util.rs
+LINE: 5
+SEVERITY: INFO
+COMMENT: Minor style suggestion
+"#;
+        
+        let review = ReviewParser::parse(output);
+        assert_eq!(review.inline_comments.len(), 3);
+        assert_eq!(review.inline_comments[0].severity, SeverityLevel::Critical);
+        assert_eq!(review.inline_comments[1].severity, SeverityLevel::Warning);
+        assert_eq!(review.inline_comments[2].severity, SeverityLevel::Info);
+    }
+
+    #[test]
+    fn test_format_severity_emoji() {
+        assert_eq!(ReviewParser::format_severity_emoji(&SeverityLevel::Critical), "\u{1f534}");
+        assert_eq!(ReviewParser::format_severity_emoji(&SeverityLevel::Warning), "\u{1f7e1}");
+        assert_eq!(ReviewParser::format_severity_emoji(&SeverityLevel::Info), "\u{1f535}");
     }
 
     #[test]
