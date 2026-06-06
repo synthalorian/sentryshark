@@ -7,7 +7,7 @@ use axum::{
 use std::sync::Arc;
 use tower::util::ServiceExt;
 
-use sentryshark::config::{AppConfig, GitHubConfig, GitLabConfig, LlmConfig};
+use sentryshark::config::{AppConfig, GitHubConfig, GitLabConfig, LlmConfig, ReviewConfig, DiffFilterConfig, BatchingConfig};
 use sentryshark::AppState;
 
 fn create_test_app() -> Router {
@@ -32,6 +32,25 @@ fn create_test_app() -> Router {
             max_tokens: 100,
             temperature: 0.1,
         },
+        review: Some(ReviewConfig {
+            security: true,
+            style: true,
+            performance: true,
+            correctness: true,
+            maintainability: true,
+            inline_comments: true,
+            summary_comment: true,
+        }),
+        diff_filter: Some(DiffFilterConfig {
+            enabled: true,
+            lockfile_patterns: vec!["Cargo.lock".to_string()],
+            generated_patterns: vec!["*.min.js".to_string()],
+        }),
+        batching: Some(BatchingConfig {
+            enabled: false,
+            timeout_seconds: 30,
+            max_size: 10,
+        }),
     };
 
     let state = AppState {
