@@ -1,7 +1,6 @@
 use axum::{
     extract::State,
     http::{StatusCode, HeaderMap},
-    Json,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn, error};
@@ -79,8 +78,15 @@ fn verify_gitlab_token(headers: &HeaderMap, expected: &str) -> bool {
 pub async fn webhook_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(payload): Json<GitLabWebhook>,
+    body: axum::body::Bytes,
 ) -> StatusCode {
+    let payload: GitLabWebhook = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("Failed to parse GitLab webhook JSON: {}", e);
+            return StatusCode::BAD_REQUEST;
+        }
+    };
     let gitlab_config = match state.config.gitlab.as_ref() {
         Some(cfg) => cfg,
         None => {
@@ -91,6 +97,7 @@ pub async fn webhook_handler(
 
     if !verify_gitlab_token(&headers, &gitlab_config.webhook_secret) {
         warn!("GitLab webhook token verification failed");
+        state.metrics.record_webhook_rejected();
         return StatusCode::UNAUTHORIZED;
     }
 
@@ -142,28 +149,13 @@ pub async fn webhook_handler(
     let batch_timeout = Duration::from_secs(batching_config.timeout_seconds);
     let database = state.database.clone();
 
+    let review_start = std::time::Instant::now();
+    let metrics = state.metrics.clone();
+
     tokio::spawn(async move {
         info!("Processing GitLab MR !{}: {}", mr_iid, mr_title);
 
-        let engine = ReviewEngine::new(
-            &crate::config::AppConfig {
-                server: crate::config::ServerConfig { host: "0.0.0.0".to_string(), port: 3000 },
-                github: None,
-                gitlab: None,
-                llm: crate::config::LlmConfig {
-                    provider: "llamacpp".to_string(),
-                    base_url: "http://localhost:8080".to_string(),
-                    model: "default".to_string(),
-                    max_tokens: 4096,
-                    temperature: 0.1,
-                },
-                review: Some(crate::config::ReviewConfig::default()),
-                diff_filter: Some(crate::config::DiffFilterConfig::default()),
-                batching: Some(crate::config::BatchingConfig::default()),
-                database: Some(crate::config::DatabaseConfig::default()),
-                dashboard: Some(crate::config::DashboardConfig::default()),
-            }
-        );
+        let engine = ReviewEngine::from_diff_filter_config(state.config.diff_filter_config());
 
         if use_batching {
             let batch_key = format!("{}:{}", project_path, mr_iid);
@@ -190,6 +182,8 @@ pub async fn webhook_handler(
                         &base_url,
                         Some(&database),
                         ci_cd_enabled,
+                        &metrics,
+                        review_start,
                     ).await;
                 }
             }
@@ -198,6 +192,7 @@ pub async fn webhook_handler(
                 Ok(d) => d,
                 Err(e) => {
                     error!("Failed to clone and diff: {}", e);
+                    metrics.record_review_failed();
                     return;
                 }
             };
@@ -211,9 +206,13 @@ pub async fn webhook_handler(
                 Ok(r) => r,
                 Err(e) => {
                     error!("LLM review failed: {}", e);
+                    metrics.record_review_failed();
                     return;
                 }
             };
+
+            let verdict = format!("{:?}", review.verdict);
+            let repo_name = format!("gitlab/{}", project_id);
 
             if let Err(e) = post_review(
                 project_id,
@@ -226,6 +225,9 @@ pub async fn webhook_handler(
                 ci_cd_enabled,
             ).await {
                 error!("Failed to post GitLab review: {}", e);
+                metrics.record_review_failed();
+            } else {
+                metrics.record_review(&verdict, &repo_name, Some(review_start));
             }
         }
     });
@@ -245,6 +247,8 @@ async fn process_batch_review(
     base_url: &str,
     database: Option<&crate::db::Database>,
     ci_cd_enabled: bool,
+    metrics: &crate::metrics::Metrics,
+    review_start: std::time::Instant,
 ) {
     info!(
         "Processing batch review for !{} in project {} with {} commits",
@@ -258,6 +262,7 @@ async fn process_batch_review(
         Ok(d) => d,
         Err(e) => {
             error!("Failed to generate batch diff: {}", e);
+            metrics.record_review_failed();
             return;
         }
     };
@@ -271,12 +276,19 @@ async fn process_batch_review(
         Ok(r) => r,
         Err(e) => {
             error!("LLM batch review failed: {}", e);
+            metrics.record_review_failed();
             return;
         }
     };
 
+    let verdict = format!("{:?}", review.verdict);
+    let repo_name = format!("gitlab/{}", project_id);
+
     if let Err(e) = post_review(project_id, mr_iid, head_sha, &review, access_token, base_url, database, ci_cd_enabled).await {
         error!("Failed to post GitLab batch review: {}", e);
+        metrics.record_review_failed();
+    } else {
+        metrics.record_review(&verdict, &repo_name, Some(review_start));
     }
 }
 

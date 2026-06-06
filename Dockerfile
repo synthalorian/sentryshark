@@ -1,16 +1,55 @@
-FROM rust:1.75-slim-bookworm as builder
+# Build stage
+FROM rust:1.75-slim-bookworm AS builder
 
 WORKDIR /app
+
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy manifests first for better layer caching
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY tests ./tests
+COPY config.example.toml ./
+
+# Build release binary
 RUN cargo build --release
 
+# Runtime stage
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y git ca-certificates && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY --from=builder /app/target/release/code-review-bot /usr/local/bin/
-COPY config.example.toml ./config.toml
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    git \
+    libssl3 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN useradd -m -u 1000 sentryshark
+
+# Copy binary from builder
+COPY --from=builder /app/target/release/sentryshark /usr/local/bin/sentryshark
+COPY --from=builder /app/config.example.toml ./config.example.toml
+
+# Set ownership
+RUN chown -R sentryshark:sentryshark /app
+
+USER sentryshark
 
 EXPOSE 3000
+
+ENV RUST_LOG=info
+ENV CONFIG_PATH=/app/config.toml
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:3000/health || exit 1
+
 CMD ["sentryshark"]

@@ -245,7 +245,7 @@ impl AppConfig {
         let config_path = std::env::var("CONFIG_PATH")
             .unwrap_or_else(|_| "config.toml".to_string());
 
-        if Path::new(&config_path).exists() {
+        let config = if Path::new(&config_path).exists() {
             let content = std::fs::read_to_string(&config_path)?;
             let mut config: AppConfig = toml::from_str(&content)?;
 
@@ -265,9 +265,88 @@ impl AppConfig {
                 config.dashboard = Some(DashboardConfig::default());
             }
 
-            Ok(config)
+            config
         } else {
-            Ok(AppConfig::default())
+            AppConfig::default()
+        };
+
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Validate configuration and return descriptive errors.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let mut errors = Vec::new();
+
+        // Validate server config
+        if self.server.port == 0 {
+            errors.push("server.port must be non-zero".to_string());
+        }
+
+        // Validate LLM config
+        if self.llm.base_url.is_empty() {
+            errors.push("llm.base_url must not be empty".to_string());
+        }
+        if self.llm.model.is_empty() {
+            errors.push("llm.model must not be empty".to_string());
+        }
+        if self.llm.max_tokens == 0 {
+            errors.push("llm.max_tokens must be greater than 0".to_string());
+        }
+        if !(0.0..=2.0).contains(&self.llm.temperature) {
+            errors.push("llm.temperature must be between 0.0 and 2.0".to_string());
+        }
+
+        // Validate GitHub config if present
+        if let Some(ref github) = self.github {
+            if github.webhook_secret.is_empty() {
+                errors.push("github.webhook_secret must not be empty".to_string());
+            }
+            if github.app_id.is_empty() {
+                errors.push("github.app_id must not be empty".to_string());
+            }
+            if github.private_key_path.is_empty() {
+                errors.push("github.private_key_path must not be empty".to_string());
+            }
+            if github.use_app_auth && !std::path::Path::new(&github.private_key_path).exists() {
+                errors.push(format!(
+                    "github.private_key_path '{}' does not exist",
+                    github.private_key_path
+                ));
+            }
+        }
+
+        // Validate GitLab config if present
+        if let Some(ref gitlab) = self.gitlab {
+            if gitlab.webhook_secret.is_empty() {
+                errors.push("gitlab.webhook_secret must not be empty".to_string());
+            }
+            if gitlab.access_token.is_empty() {
+                errors.push("gitlab.access_token must not be empty".to_string());
+            }
+        }
+
+        // Validate that at least one provider is configured
+        if self.github.is_none() && self.gitlab.is_none() {
+            errors.push("At least one of github or gitlab must be configured".to_string());
+        }
+
+        // Validate batching config
+        let batching = self.batching_config();
+        if batching.timeout_seconds == 0 {
+            errors.push("batching.timeout_seconds must be greater than 0".to_string());
+        }
+        if batching.max_size == 0 {
+            errors.push("batching.max_size must be greater than 0".to_string());
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "Configuration validation failed:\n  - {}",
+                errors.join("\n  - ")
+            ))
         }
     }
 

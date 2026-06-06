@@ -28,7 +28,10 @@ pub struct ReviewEngine {
 
 impl ReviewEngine {
     pub fn new(config: &AppConfig) -> Self {
-        let diff_filter_config = config.diff_filter_config();
+        Self::from_diff_filter_config(config.diff_filter_config())
+    }
+
+    pub fn from_diff_filter_config(diff_filter_config: &crate::config::DiffFilterConfig) -> Self {
         let diff_filter = if diff_filter_config.enabled {
             Some(DiffFilter::new(
                 &diff_filter_config.lockfile_patterns,

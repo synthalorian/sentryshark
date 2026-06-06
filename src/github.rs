@@ -239,6 +239,7 @@ pub async fn webhook_handler(
 
     if !verify_github_signature(&github_config.webhook_secret, &body, signature) {
         warn!("GitHub webhook signature verification failed");
+        state.metrics.record_webhook_rejected();
         return StatusCode::UNAUTHORIZED;
     }
 
@@ -294,23 +295,10 @@ pub async fn webhook_handler(
     tokio::spawn(async move {
         info!("Processing GitHub PR #{}: {}", pr_number, pr_title);
 
-        let engine = ReviewEngine::new(&crate::config::AppConfig {
-            server: crate::config::ServerConfig { host: "0.0.0.0".to_string(), port: 3000 },
-            github: None,
-            gitlab: None,
-            llm: crate::config::LlmConfig {
-                provider: "llamacpp".to_string(),
-                base_url: "http://localhost:8080".to_string(),
-                model: "default".to_string(),
-                max_tokens: 4096,
-                temperature: 0.1,
-            },
-            review: Some(crate::config::ReviewConfig::default()),
-            diff_filter: Some(crate::config::DiffFilterConfig::default()),
-            batching: Some(crate::config::BatchingConfig::default()),
-            database: Some(crate::config::DatabaseConfig::default()),
-            dashboard: Some(crate::config::DashboardConfig::default()),
-        });
+        let engine = ReviewEngine::from_diff_filter_config(state.config.diff_filter_config());
+
+        let review_start = std::time::Instant::now();
+        let metrics = state.metrics.clone();
 
         if use_batching {
             let batch_key = format!("{}:{}", repo_name, pr_number);
@@ -337,6 +325,8 @@ pub async fn webhook_handler(
                         &batch,
                         &github_config,
                         Some(&db),
+                        &metrics,
+                        review_start,
                     ).await;
                 }
             }
@@ -345,6 +335,7 @@ pub async fn webhook_handler(
                 Ok(d) => d,
                 Err(e) => {
                     error!("Failed to clone and diff: {}", e);
+                    metrics.record_review_failed();
                     return;
                 }
             };
@@ -358,6 +349,7 @@ pub async fn webhook_handler(
                 Ok(r) => r,
                 Err(e) => {
                     error!("LLM review failed: {}", e);
+                    metrics.record_review_failed();
                     return;
                 }
             };
@@ -371,6 +363,7 @@ pub async fn webhook_handler(
             };
 
             let db = state.database.clone();
+            let verdict = format!("{:?}", review.verdict);
 
             if let Err(e) = post_review(
                 &repo_name,
@@ -381,6 +374,9 @@ pub async fn webhook_handler(
                 Some(&db),
             ).await {
                 error!("Failed to post GitHub review: {}", e);
+                metrics.record_review_failed();
+            } else {
+                metrics.record_review(&verdict, &repo_name, Some(review_start));
             }
         }
     });
@@ -398,6 +394,8 @@ async fn process_batch_review(
     batch: &crate::review::ReviewBatch,
     config: &GitHubConfig,
     database: Option<&crate::db::Database>,
+    metrics: &crate::metrics::Metrics,
+    review_start: std::time::Instant,
 ) {
     info!(
         "Processing batch review for {}/{} with {} commits",
@@ -411,6 +409,7 @@ async fn process_batch_review(
         Ok(d) => d,
         Err(e) => {
             error!("Failed to generate batch diff: {}", e);
+            metrics.record_review_failed();
             return;
         }
     };
@@ -424,12 +423,18 @@ async fn process_batch_review(
         Ok(r) => r,
         Err(e) => {
             error!("LLM batch review failed: {}", e);
+            metrics.record_review_failed();
             return;
         }
     };
 
+    let verdict = format!("{:?}", review.verdict);
+
     if let Err(e) = post_review(repo_name, pr_number, head_sha, &review, config, database).await {
         error!("Failed to post GitHub batch review: {}", e);
+        metrics.record_review_failed();
+    } else {
+        metrics.record_review(&verdict, repo_name, Some(review_start));
     }
 }
 
