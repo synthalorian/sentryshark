@@ -14,7 +14,9 @@ use crate::inline_comments::{ReviewVerdict};
 pub struct GitLabWebhook {
     pub object_kind: String,
     pub project: Project,
-    pub object_attributes: MergeRequest,
+    pub object_attributes: Option<MergeRequest>,
+    pub merge_request: Option<MergeRequest>,
+    pub build_status: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,15 +99,19 @@ pub async fn webhook_handler(
         payload.object_kind, payload.project.path_with_namespace
     );
 
-    if payload.object_kind != "merge_request" {
-        return StatusCode::OK;
-    }
+    let mr = match payload.object_kind.as_str() {
+        "merge_request" => payload.object_attributes,
+        "pipeline" => payload.merge_request,
+        _ => None,
+    };
 
-    let mr = payload.object_attributes;
-    
+    let mr = match mr {
+        Some(mr) => mr,
+        None => return StatusCode::OK,
+    };
+
     let mr_title = mr.title.clone();
-    
-    // Only review on open or update actions
+
     let action = mr.action.as_deref().unwrap_or("");
     if mr.state != "opened" && action != "open" && action != "update" && action != "merge" {
         return StatusCode::OK;
@@ -129,9 +135,12 @@ pub async fn webhook_handler(
     );
 
     let access_token = gitlab_config.access_token.clone();
+    let base_url = gitlab_config.base_url.clone();
+    let ci_cd_enabled = gitlab_config.ci_cd_enabled;
     let batching_config = state.config.batching_config().clone();
     let use_batching = batching_config.enabled;
     let batch_timeout = Duration::from_secs(batching_config.timeout_seconds);
+    let database = state.database.clone();
 
     tokio::spawn(async move {
         info!("Processing GitLab MR !{}: {}", mr_iid, mr_title);
@@ -151,6 +160,8 @@ pub async fn webhook_handler(
                 review: Some(crate::config::ReviewConfig::default()),
                 diff_filter: Some(crate::config::DiffFilterConfig::default()),
                 batching: Some(crate::config::BatchingConfig::default()),
+                database: Some(crate::config::DatabaseConfig::default()),
+                dashboard: Some(crate::config::DashboardConfig::default()),
             }
         );
 
@@ -176,6 +187,9 @@ pub async fn webhook_handler(
                         &head_sha,
                         &batch,
                         &access_token,
+                        &base_url,
+                        Some(&database),
+                        ci_cd_enabled,
                     ).await;
                 }
             }
@@ -207,6 +221,9 @@ pub async fn webhook_handler(
                 &head_sha,
                 &review,
                 &access_token,
+                &base_url,
+                Some(&database),
+                ci_cd_enabled,
             ).await {
                 error!("Failed to post GitLab review: {}", e);
             }
@@ -216,6 +233,7 @@ pub async fn webhook_handler(
     StatusCode::OK
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_batch_review(
     engine: &ReviewEngine,
     llm: &LlmClient,
@@ -224,6 +242,9 @@ async fn process_batch_review(
     head_sha: &str,
     batch: &crate::review::ReviewBatch,
     access_token: &str,
+    base_url: &str,
+    database: Option<&crate::db::Database>,
+    ci_cd_enabled: bool,
 ) {
     info!(
         "Processing batch review for !{} in project {} with {} commits",
@@ -254,19 +275,22 @@ async fn process_batch_review(
         }
     };
 
-    if let Err(e) = post_review(project_id, mr_iid, head_sha, &review, access_token).await {
+    if let Err(e) = post_review(project_id, mr_iid, head_sha, &review, access_token, base_url, database, ci_cd_enabled).await {
         error!("Failed to post GitLab batch review: {}", e);
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn post_review(
     project_id: u64,
     mr_iid: u64,
     head_sha: &str,
     review: &crate::inline_comments::StructuredReview,
     access_token: &str,
+    base_url: &str,
+    database: Option<&crate::db::Database>,
+    ci_cd_enabled: bool,
 ) -> anyhow::Result<()> {
-    // Post inline comments as discussions if available
     if !review.inline_comments.is_empty() {
         for comment in &review.inline_comments {
             post_inline_discussion(
@@ -275,13 +299,31 @@ pub async fn post_review(
                 head_sha,
                 comment,
                 access_token,
+                base_url,
             ).await?;
         }
     }
 
-    // Always post summary note
-    let body = format_summary_body(review);
-    post_review_note(project_id, mr_iid, &body, access_token).await?;
+    let body = if ci_cd_enabled {
+        format_ci_summary_body(review)
+    } else {
+        format_summary_body(review)
+    };
+    post_review_note(project_id, mr_iid, &body, access_token, base_url).await?;
+
+    if let Some(db) = database {
+        let verdict = format!("{:?}", review.verdict);
+        let repo = format!("gitlab/{}", project_id);
+        let _ = db.save_review(
+            &repo,
+            mr_iid as i64,
+            "gitlab",
+            head_sha,
+            &verdict,
+            &review.summary,
+            review.inline_comments.len() as i64,
+        ).await;
+    }
 
     Ok(())
 }
@@ -292,11 +334,12 @@ async fn post_inline_discussion(
     head_sha: &str,
     comment: &crate::inline_comments::InlineComment,
     access_token: &str,
+    base_url: &str,
 ) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
     let url = format!(
-        "https://gitlab.com/api/v4/projects/{}/merge_requests/{}/discussions",
-        project_id, mr_iid
+        "{}/api/v4/projects/{}/merge_requests/{}/discussions",
+        base_url, project_id, mr_iid
     );
 
     let discussion = GitLabDiscussion {
@@ -337,11 +380,12 @@ pub async fn post_review_note(
     mr_iid: u64,
     body: &str,
     access_token: &str,
+    base_url: &str,
 ) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
     let url = format!(
-        "https://gitlab.com/api/v4/projects/{}/merge_requests/{}/notes",
-        project_id, mr_iid
+        "{}/api/v4/projects/{}/merge_requests/{}/notes",
+        base_url, project_id, mr_iid
     );
 
     let note = GitLabNote {
@@ -395,6 +439,36 @@ fn format_summary_body(review: &crate::inline_comments::StructuredReview) -> Str
     body
 }
 
+fn format_ci_summary_body(review: &crate::inline_comments::StructuredReview) -> String {
+    let verdict_emoji = match review.verdict {
+        ReviewVerdict::Approve => "✅",
+        ReviewVerdict::RequestChanges => "❌",
+        ReviewVerdict::Comment => "💬",
+    };
+
+    let mut body = format!(
+        "🦈 **SentryShark CI/CD Review**\n\n{} **Verdict:** {:?}\n\n{}",
+        verdict_emoji,
+        review.verdict,
+        review.summary
+    );
+
+    if !review.inline_comments.is_empty() {
+        body.push_str("\n\n**Inline Comments:**\n");
+        for comment in &review.inline_comments {
+            body.push_str(&format!(
+                "- `{}:{}` - {}\n",
+                comment.file_path,
+                comment.line,
+                comment.body.lines().next().unwrap_or("")
+            ));
+        }
+    }
+
+    body.push_str("\n\n*This review was triggered by a CI/CD pipeline event.*");
+    body
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,5 +503,19 @@ mod tests {
         assert!(body.contains("✅"));
         assert!(body.contains("Approve"));
         assert!(body.contains("src/main.rs:42"));
+    }
+
+    #[test]
+    fn test_format_ci_summary_body() {
+        let review = crate::inline_comments::StructuredReview {
+            verdict: ReviewVerdict::Comment,
+            summary: "Some suggestions".to_string(),
+            inline_comments: vec![],
+        };
+
+        let body = format_ci_summary_body(&review);
+        assert!(body.contains("💬"));
+        assert!(body.contains("CI/CD Review"));
+        assert!(body.contains("triggered by a CI/CD pipeline event"));
     }
 }
