@@ -10,6 +10,8 @@ pub struct AppConfig {
     pub review: Option<ReviewConfig>,
     pub diff_filter: Option<DiffFilterConfig>,
     pub batching: Option<BatchingConfig>,
+    pub database: Option<DatabaseConfig>,
+    pub dashboard: Option<DashboardConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,12 +25,20 @@ pub struct GitHubConfig {
     pub webhook_secret: String,
     pub app_id: String,
     pub private_key_path: String,
+    #[serde(default = "default_false")]
+    pub use_app_auth: bool,
+    #[serde(default)]
+    pub installation_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitLabConfig {
     pub webhook_secret: String,
     pub access_token: String,
+    #[serde(default = "default_false")]
+    pub ci_cd_enabled: bool,
+    #[serde(default = "default_gitlab_url")]
+    pub base_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +104,36 @@ fn default_batch_max_size() -> usize {
     10
 }
 
+fn default_false() -> bool {
+    false
+}
+
+fn default_gitlab_url() -> String {
+    "https://gitlab.com".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatabaseConfig {
+    #[serde(default = "default_db_path")]
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_dashboard_refresh")]
+    pub refresh_seconds: u64,
+}
+
+fn default_db_path() -> String {
+    "sentryshark.db".to_string()
+}
+
+fn default_dashboard_refresh() -> u64 {
+    30
+}
+
 fn default_lockfile_patterns() -> Vec<String> {
     vec![
         "Cargo.lock".to_string(),
@@ -143,6 +183,8 @@ impl Default for AppConfig {
             review: Some(ReviewConfig::default()),
             diff_filter: Some(DiffFilterConfig::default()),
             batching: Some(BatchingConfig::default()),
+            database: Some(DatabaseConfig::default()),
+            dashboard: Some(DashboardConfig::default()),
         }
     }
 }
@@ -181,6 +223,23 @@ impl Default for BatchingConfig {
     }
 }
 
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            path: default_db_path(),
+        }
+    }
+}
+
+impl Default for DashboardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            refresh_seconds: default_dashboard_refresh(),
+        }
+    }
+}
+
 impl AppConfig {
     pub fn load() -> anyhow::Result<Self> {
         let config_path = std::env::var("CONFIG_PATH")
@@ -189,8 +248,7 @@ impl AppConfig {
         if Path::new(&config_path).exists() {
             let content = std::fs::read_to_string(&config_path)?;
             let mut config: AppConfig = toml::from_str(&content)?;
-            
-            // Ensure defaults are applied for missing sections
+
             if config.review.is_none() {
                 config.review = Some(ReviewConfig::default());
             }
@@ -200,7 +258,13 @@ impl AppConfig {
             if config.batching.is_none() {
                 config.batching = Some(BatchingConfig::default());
             }
-            
+            if config.database.is_none() {
+                config.database = Some(DatabaseConfig::default());
+            }
+            if config.dashboard.is_none() {
+                config.dashboard = Some(DashboardConfig::default());
+            }
+
             Ok(config)
         } else {
             Ok(AppConfig::default())
@@ -225,6 +289,20 @@ impl AppConfig {
         self.batching.as_ref().unwrap_or_else(|| {
             static DEFAULT: std::sync::OnceLock<BatchingConfig> = std::sync::OnceLock::new();
             DEFAULT.get_or_init(BatchingConfig::default)
+        })
+    }
+
+    pub fn database_config(&self) -> &DatabaseConfig {
+        self.database.as_ref().unwrap_or_else(|| {
+            static DEFAULT: std::sync::OnceLock<DatabaseConfig> = std::sync::OnceLock::new();
+            DEFAULT.get_or_init(DatabaseConfig::default)
+        })
+    }
+
+    pub fn dashboard_config(&self) -> &DashboardConfig {
+        self.dashboard.as_ref().unwrap_or_else(|| {
+            static DEFAULT: std::sync::OnceLock<DashboardConfig> = std::sync::OnceLock::new();
+            DEFAULT.get_or_init(DashboardConfig::default)
         })
     }
 }

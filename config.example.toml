@@ -6,10 +6,14 @@ port = 3000
 webhook_secret = "your-webhook-secret"
 app_id = "123456"
 private_key_path = "/path/to/private-key.pem"
+use_app_auth = false
+installation_id = 12345678
 
 [gitlab]
 webhook_secret = "your-webhook-secret"
 access_token = "glpat-xxxxxxxx"
+ci_cd_enabled = false
+base_url = "https://gitlab.com"
 
 [llm]
 provider = "llamacpp"
@@ -58,3 +62,10 @@ generated_patterns = [
 enabled = false
 timeout_seconds = 30
 max_size = 10
+
+[database]
+path = "sentryshark.db"
+
+[dashboard]
+enabled = true
+refresh_seconds = 30
