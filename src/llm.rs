@@ -122,7 +122,7 @@ impl LlmClient {
             prompt.push_str("- Maintainability: Complexity, test coverage, documentation, modularity\n");
         }
         
-        prompt.push_str("\n");
+        prompt.push('\n');
         
         // Request structured output
         prompt.push_str("Please provide your review in the following format:\n\n");
