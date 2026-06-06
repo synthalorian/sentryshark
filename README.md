@@ -187,7 +187,7 @@ Health check endpoint. Returns server status and connectivity info.
 ```json
 {
   "status": "healthy",
-  "version": "0.7.0",
+  "version": "1.0.0",
   "database": "connected",
   "config_loaded": true
 }

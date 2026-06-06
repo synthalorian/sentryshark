@@ -71,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
     let app = app.with_state(state.clone());
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
-    info!("\u{1f988} SentryShark v0.7.0 listening on {}", listener.local_addr()?);
+    info!("\u{1f988} SentryShark v1.0.0 listening on {}", listener.local_addr()?);
 
     let shutdown_clone = shutdown.clone();
     tokio::spawn(async move {
@@ -130,7 +130,7 @@ async fn health_check(axum::extract::State(state): axum::extract::State<AppState
 
     Json(HealthStatus {
         status: "healthy".to_string(),
-        version: "0.7.0".to_string(),
+        version: "1.0.0".to_string(),
         database: db_status.to_string(),
         config_loaded: true,
     })

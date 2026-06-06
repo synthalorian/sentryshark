@@ -70,13 +70,13 @@ Self-hosted AI code review bot. Rust + Axum. No cloud, no API keys.
 - [x] Performance profiling and optimization pass
 - [x] Configuration examples for common setups (self-hosted, Docker, k8s)
 
-## v1.0.0 — Ship It
+## v1.0.0 — Ship It (Complete)
 
-- [ ] All tests pass, CI green
-- [ ] Binary releases for Linux x86_64/ARM64
-- [ ] Docker image on GHCR
-- [ ] Documentation complete
-- [ ] Show HN launch
+- [x] All tests pass, CI green
+- [x] Binary releases for Linux x86_64/ARM64
+- [x] Docker image on GHCR
+- [x] Documentation complete
+- [x] Show HN launch
 
 ---
 

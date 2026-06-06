@@ -1,6 +1,6 @@
 [package]
 name = "sentryshark"
-version = "0.7.0"
+version = "1.0.0"
 edition = "2021"
 authors = ["synthalorian <synthalorian@gmail.com>"]
 description = "Self-hosted AI code review bot using local LLMs"
