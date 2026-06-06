@@ -7,13 +7,146 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn, error};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use crate::{AppState, review::{ReviewEngine, CommitRange}, llm::LlmClient};
 use crate::config::GitHubConfig;
 use crate::inline_comments::ReviewVerdict;
 
 type HmacSha256 = Hmac<Sha256>;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GitHubJwtClaims {
+    iss: String,
+    iat: usize,
+    exp: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubInstallationToken {
+    token: String,
+    #[allow(dead_code)]
+    expires_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubInstallation {
+    id: u64,
+}
+
+#[derive(Clone)]
+pub struct GitHubAuth {
+    config: GitHubConfig,
+    cached_token: Arc<Mutex<Option<(String, SystemTime)>>>,
+}
+
+impl GitHubAuth {
+    pub fn new(config: GitHubConfig) -> Self {
+        Self {
+            config,
+            cached_token: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn generate_jwt(&self) -> anyhow::Result<String> {
+        let private_key_pem = std::fs::read_to_string(&self.config.private_key_path)?;
+        let encoding_key = jsonwebtoken::EncodingKey::from_rsa_pem(private_key_pem.as_bytes())?;
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)?
+            .as_secs() as usize;
+        let exp = now + 600;
+
+        let claims = GitHubJwtClaims {
+            iss: self.config.app_id.clone(),
+            iat: now,
+            exp,
+        };
+
+        let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+        let jwt = jsonwebtoken::encode(&header, &claims, &encoding_key)?;
+
+        Ok(jwt)
+    }
+
+    async fn get_installation_token(&self) -> anyhow::Result<String> {
+        let mut cached = self.cached_token.lock().await;
+        if let Some((token, expires)) = cached.as_ref() {
+            let now = SystemTime::now();
+            if now < *expires {
+                info!("Using cached GitHub installation token");
+                return Ok(token.clone());
+            }
+        }
+
+        let jwt = self.generate_jwt()?;
+
+        let installation_id = if let Some(id) = self.config.installation_id {
+            id
+        } else {
+            let client = reqwest::Client::new();
+            let response = client
+                .get("https://api.github.com/app/installations")
+                .header("Authorization", format!("Bearer {}", jwt))
+                .header("Accept", "application/vnd.github.v3+json")
+                .header("User-Agent", "SentryShark")
+                .send()
+                .await?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                return Err(anyhow::anyhow!("GitHub API error {}: {}", status, text));
+            }
+
+            let installations: Vec<GitHubInstallation> = response.json().await?;
+            installations
+                .into_iter()
+                .next()
+                .map(|i| i.id)
+                .ok_or_else(|| anyhow::anyhow!("No GitHub App installations found"))?
+        };
+
+        let client = reqwest::Client::new();
+        let url = format!(
+            "https://api.github.com/app/installations/{}/access_tokens",
+            installation_id
+        );
+
+        let response = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", jwt))
+            .header("Accept", "application/vnd.github.v3+json")
+            .header("User-Agent", "SentryShark")
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("GitHub API error {}: {}", status, text));
+        }
+
+        let token_response: GitHubInstallationToken = response.json().await?;
+        let expires = SystemTime::now() + Duration::from_secs(3300);
+
+        info!("Obtained new GitHub installation token");
+        *cached = Some((token_response.token.clone(), expires));
+
+        Ok(token_response.token)
+    }
+
+    async fn get_token(&self) -> anyhow::Result<String> {
+        if self.config.use_app_auth {
+            self.get_installation_token().await
+        } else {
+            std::fs::read_to_string(&self.config.private_key_path)
+                .or_else(|_| Ok(self.config.app_id.clone()))
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct GitHubWebhook {
@@ -175,6 +308,8 @@ pub async fn webhook_handler(
             review: Some(crate::config::ReviewConfig::default()),
             diff_filter: Some(crate::config::DiffFilterConfig::default()),
             batching: Some(crate::config::BatchingConfig::default()),
+            database: Some(crate::config::DatabaseConfig::default()),
+            dashboard: Some(crate::config::DashboardConfig::default()),
         });
 
         if use_batching {
@@ -192,6 +327,7 @@ pub async fn webhook_handler(
                 tokio::time::sleep(batch_timeout).await;
                 
                 if let Some(batch) = engine.get_batch(&batch_key).await {
+                    let db = state.database.clone();
                     process_batch_review(
                         &engine,
                         &llm,
@@ -200,6 +336,7 @@ pub async fn webhook_handler(
                         &head_sha,
                         &batch,
                         &github_config,
+                        Some(&db),
                     ).await;
                 }
             }
@@ -229,7 +366,11 @@ pub async fn webhook_handler(
                 webhook_secret: String::new(),
                 app_id: github_app_id,
                 private_key_path: github_key_path,
+                use_app_auth: github_config.use_app_auth,
+                installation_id: github_config.installation_id,
             };
+
+            let db = state.database.clone();
 
             if let Err(e) = post_review(
                 &repo_name,
@@ -237,6 +378,7 @@ pub async fn webhook_handler(
                 &head_sha,
                 &review,
                 &config,
+                Some(&db),
             ).await {
                 error!("Failed to post GitHub review: {}", e);
             }
@@ -246,6 +388,7 @@ pub async fn webhook_handler(
     StatusCode::OK
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_batch_review(
     engine: &ReviewEngine,
     llm: &LlmClient,
@@ -254,6 +397,7 @@ async fn process_batch_review(
     head_sha: &str,
     batch: &crate::review::ReviewBatch,
     config: &GitHubConfig,
+    database: Option<&crate::db::Database>,
 ) {
     info!(
         "Processing batch review for {}/{} with {} commits",
@@ -284,7 +428,7 @@ async fn process_batch_review(
         }
     };
 
-    if let Err(e) = post_review(repo_name, pr_number, head_sha, &review, config).await {
+    if let Err(e) = post_review(repo_name, pr_number, head_sha, &review, config, database).await {
         error!("Failed to post GitHub batch review: {}", e);
     }
 }
@@ -295,17 +439,29 @@ pub async fn post_review(
     head_sha: &str,
     review: &crate::inline_comments::StructuredReview,
     config: &GitHubConfig,
+    database: Option<&crate::db::Database>,
 ) -> anyhow::Result<()> {
-    let token = std::fs::read_to_string(&config.private_key_path)
-        .unwrap_or_else(|_| config.app_id.clone());
+    let auth = GitHubAuth::new(config.clone());
+    let token = auth.get_token().await?;
 
-    // Post inline comments via PR review API if available
     if !review.inline_comments.is_empty() {
         post_pull_request_review(repo, pr_number, head_sha, review, &token).await?;
     } else {
-        // Fall back to issue comment for summary only
         let body = format_summary_body(review);
         post_issue_comment(repo, pr_number, &body, &token).await?;
+    }
+
+    if let Some(db) = database {
+        let verdict = format!("{:?}", review.verdict);
+        let _ = db.save_review(
+            repo,
+            pr_number as i64,
+            "github",
+            head_sha,
+            &verdict,
+            &review.summary,
+            review.inline_comments.len() as i64,
+        ).await;
     }
 
     Ok(())
@@ -347,7 +503,7 @@ async fn post_pull_request_review(
 
     let response = client
         .post(&url)
-        .header("Authorization", format!("token {}", token))
+        .header("Authorization", format!("Bearer {}", token))
         .header("Accept", "application/vnd.github.v3+json")
         .header("User-Agent", "SentryShark")
         .json(&review_request)
@@ -382,7 +538,7 @@ async fn post_issue_comment(
 
     let response = client
         .post(&url)
-        .header("Authorization", format!("token {}", token))
+        .header("Authorization", format!("Bearer {}", token))
         .header("Accept", "application/vnd.github.v3+json")
         .header("User-Agent", "SentryShark")
         .json(&comment)
@@ -434,8 +590,8 @@ pub async fn post_review_comment(
     body: &str,
     config: &GitHubConfig,
 ) -> anyhow::Result<()> {
-    let token = std::fs::read_to_string(&config.private_key_path)
-        .unwrap_or_else(|_| config.app_id.clone());
+    let auth = GitHubAuth::new(config.clone());
+    let token = auth.get_token().await?;
     post_issue_comment(repo, pr_number, body, &token).await
 }
 
@@ -492,5 +648,21 @@ mod tests {
         let body = format_summary_body(&review);
         assert!(body.contains("❌"));
         assert!(body.contains("RequestChanges"));
+    }
+
+    #[test]
+    fn test_github_auth_token_fallback() {
+        let config = GitHubConfig {
+            webhook_secret: "secret".to_string(),
+            app_id: "test-app-id".to_string(),
+            private_key_path: "/tmp/nonexistent.pem".to_string(),
+            use_app_auth: false,
+            installation_id: None,
+        };
+
+        let auth = GitHubAuth::new(config);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let token = rt.block_on(auth.get_token()).unwrap();
+        assert_eq!(token, "test-app-id");
     }
 }
