@@ -1,4 +1,4 @@
-# 🦈 SentryShark
+# 🦞 SentryShark
 
 Self-hosted AI code review for GitHub/GitLab PRs. Runs entirely on your infrastructure — no API keys, no data leaves your network.
 
@@ -326,4 +326,4 @@ SentryShark is designed for minimal resource usage:
 
 ## License
 
-MIT — This is the wave. 🎹🦈
+MIT — This is the wave. 🎹🦞

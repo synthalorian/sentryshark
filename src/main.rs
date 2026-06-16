@@ -46,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
     let shutdown = ShutdownHandle::new();
 
     let state = AppState {
-        config,
+        config: config.clone(),
         database,
         metrics,
         rate_limiter,
@@ -70,8 +70,9 @@ async fn main() -> anyhow::Result<()> {
 
     let app = app.with_state(state.clone());
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
-    info!("\u{1f988} SentryShark v1.0.0 listening on {}", listener.local_addr()?);
+    let bind_addr = format!("{}:{}", config.server.host, config.server.port);
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+    info!("\u{1f988} SentryShark v{} listening on {}", env!("CARGO_PKG_VERSION"), listener.local_addr()?);
 
     let shutdown_clone = shutdown.clone();
     tokio::spawn(async move {

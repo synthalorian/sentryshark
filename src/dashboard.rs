@@ -161,7 +161,7 @@ async fn render_dashboard(db: &Database, refresh_seconds: u64) -> anyhow::Result
 <body>
     <div class="container">
         <header>
-            <h1>🦈 SentryShark Dashboard</h1>
+            <h1>🦞 SentryShark Dashboard</h1>
             <p>Code review analytics and history</p>
         </header>
         <div class="stats">

@@ -1,7 +1,8 @@
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, Result as SqliteResult};
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::inline_comments::{InlineComment, ReviewVerdict, StructuredReview};
@@ -157,7 +158,7 @@ impl Database {
         warning_count: i64,
         info_count: i64,
     ) -> anyhow::Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().await;
         let created_at = Utc::now().to_rfc3339();
 
         conn.execute(
@@ -172,7 +173,7 @@ impl Database {
     }
 
     pub async fn get_recent_reviews(&self, limit: i64) -> anyhow::Result<Vec<ReviewRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
             "SELECT id, repo, pr_number, provider, head_sha, verdict, summary, inline_count, created_at
              FROM reviews
@@ -208,7 +209,7 @@ impl Database {
     }
 
     pub async fn get_stats(&self) -> anyhow::Result<ReviewStats> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().await;
 
         let total_reviews: i64 = conn.query_row(
             "SELECT COUNT(*) FROM reviews",
@@ -271,7 +272,7 @@ impl Database {
     }
 
     pub async fn get_reviews_by_repo(&self, repo: &str) -> anyhow::Result<Vec<ReviewRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
             "SELECT id, repo, pr_number, provider, head_sha, verdict, summary, inline_count, created_at
              FROM reviews
@@ -310,7 +311,7 @@ impl Database {
         &self,
         filters: &ReviewSearchFilters,
     ) -> anyhow::Result<Vec<ReviewRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().await;
 
         let mut conditions = Vec::new();
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -392,7 +393,7 @@ impl Database {
         provider: &str,
         diff_hash: &str,
     ) -> anyhow::Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().await;
         let created_at = Utc::now().to_rfc3339();
 
         conn.execute(
@@ -410,7 +411,7 @@ impl Database {
         status: &str,
         error: Option<&str>,
     ) -> anyhow::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().await;
         let now = Utc::now().to_rfc3339();
 
         match status {
@@ -438,7 +439,7 @@ impl Database {
     }
 
     pub async fn get_pending_jobs(&self) -> anyhow::Result<Vec<ReviewJobRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
             "SELECT id, repo, pr_number, provider, status, diff_hash, created_at, started_at, completed_at, error
              FROM review_jobs
@@ -492,7 +493,7 @@ impl Database {
         diff_hash: &str,
         ttl_hours: u64,
     ) -> anyhow::Result<Option<StructuredReview>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().await;
         let cutoff = (Utc::now() - chrono::Duration::hours(ttl_hours as i64)).to_rfc3339();
 
         let result = conn.query_row(
@@ -533,7 +534,7 @@ impl Database {
         diff_hash: &str,
         review: &StructuredReview,
     ) -> anyhow::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().await;
         let created_at = Utc::now().to_rfc3339();
         let verdict = format!("{:?}", review.verdict);
         let comments_json = serde_json::to_string(&review.inline_comments)?;
