@@ -21,7 +21,7 @@ fn test_no_hardcoded_secrets_in_source() {
     ];
 
     let output = Command::new("grep")
-        .args(&[
+        .args([
             "-r", "-n",
             "--include=*.rs",
             "-E",

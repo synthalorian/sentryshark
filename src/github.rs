@@ -145,8 +145,16 @@ impl GitHubAuth {
         if self.config.use_app_auth {
             self.get_installation_token().await
         } else {
-            std::fs::read_to_string(&self.config.private_key_path)
-                .or_else(|_| Ok(self.config.app_id.clone()))
+            // When not using app auth, the private_key_path should contain a PAT/token,
+            // not the app private key. Read it and return as the token.
+            let token = std::fs::read_to_string(&self.config.private_key_path)
+                .map_err(|e| anyhow::anyhow!("Failed to read token from {}: {}", self.config.private_key_path, e))?
+                .trim()
+                .to_string();
+            if token.is_empty() {
+                return Err(anyhow::anyhow!("Token file is empty: {}", self.config.private_key_path));
+            }
+            Ok(token)
         }
     }
 }
@@ -213,8 +221,10 @@ fn verify_github_signature(secret: &str, body: &Bytes, signature: &str) -> bool 
         Err(_) => return false,
     };
 
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-        .expect("HMAC can take key of any size");
+    let mut mac = match HmacSha256::new_from_slice(secret.as_bytes()) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
     mac.update(body);
     let result = mac.finalize();
     let code_bytes = result.into_bytes();
@@ -256,7 +266,7 @@ pub async fn webhook_handler(
 
     info!("Received GitHub webhook: {} for {}", payload.action, payload.repository.full_name);
 
-    if payload.action != "opened" && payload.action != "synchronize" {
+    if payload.action != "opened" && payload.action != "synchronize" && payload.action != "reopened" {
         return StatusCode::OK;
     }
 
@@ -713,7 +723,10 @@ mod tests {
         let body = Bytes::from_static(b"test payload");
         
         // Compute correct signature
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        let mut mac = match HmacSha256::new_from_slice(secret.as_bytes()) {
+            Ok(m) => m,
+            Err(_) => panic!("HMAC initialization failed"),
+        };
         mac.update(&body);
         let result = mac.finalize();
         let code_bytes = result.into_bytes();
@@ -760,7 +773,7 @@ mod tests {
     }
 
     #[test]
-    fn test_github_auth_token_fallback() {
+    fn test_github_auth_token_fallback_error() {
         let config = GitHubConfig {
             webhook_secret: "secret".to_string(),
             app_id: "test-app-id".to_string(),
@@ -771,7 +784,9 @@ mod tests {
 
         let auth = GitHubAuth::new(config);
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let token = rt.block_on(auth.get_token()).unwrap();
-        assert_eq!(token, "test-app-id");
+        let result = rt.block_on(auth.get_token());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("nonexistent.pem") || err.contains("Failed to read token"));
     }
 }

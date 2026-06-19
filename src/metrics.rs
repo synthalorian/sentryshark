@@ -92,13 +92,14 @@ impl Metrics {
             self.review_latency_count.fetch_add(1, Ordering::Relaxed);
         }
 
-        let mut stats = self.per_repo_stats.lock().unwrap();
-        let entry = stats.entry(repo.to_string()).or_default();
-        entry.reviews += 1;
-        match verdict {
-            "Approve" => entry.approved += 1,
-            "RequestChanges" => entry.request_changes += 1,
-            _ => entry.commented += 1,
+        if let Ok(mut stats) = self.per_repo_stats.lock() {
+            let entry = stats.entry(repo.to_string()).or_default();
+            entry.reviews += 1;
+            match verdict {
+                "Approve" => entry.approved += 1,
+                "RequestChanges" => entry.request_changes += 1,
+                _ => entry.commented += 1,
+            }
         }
     }
 
@@ -291,16 +292,17 @@ impl Metrics {
             self.info_findings.load(Ordering::Relaxed)
         ));
 
-        let repo_stats = self.per_repo_stats.lock().unwrap();
-        if !repo_stats.is_empty() {
-            output.push_str("# HELP sentryshark_repo_reviews Total reviews per repository.\n");
-            output.push_str("# TYPE sentryshark_repo_reviews counter\n");
-            for (repo, stats) in repo_stats.iter() {
-                let repo_escaped = repo.replace('\\', "\\\\").replace('"', "\\\"");
-                output.push_str(&format!(
-                    "sentryshark_repo_reviews{{repo=\"{}\"}} {}\n",
-                    repo_escaped, stats.reviews
-                ));
+        if let Ok(repo_stats) = self.per_repo_stats.lock() {
+            if !repo_stats.is_empty() {
+                output.push_str("# HELP sentryshark_repo_reviews Total reviews per repository.\n");
+                output.push_str("# TYPE sentryshark_repo_reviews counter\n");
+                for (repo, stats) in repo_stats.iter() {
+                    let repo_escaped = repo.replace('\\', "\\\\").replace('"', "\\\"");
+                    output.push_str(&format!(
+                        "sentryshark_repo_reviews{{repo=\"{}\"}} {}\n",
+                        repo_escaped, stats.reviews
+                    ));
+                }
             }
         }
 
@@ -309,18 +311,19 @@ impl Metrics {
 
     /// Render a simple JSON metrics response.
     pub fn render_json(&self) -> serde_json::Value {
-        let repo_stats = self.per_repo_stats.lock().unwrap();
         let mut repos = serde_json::Map::new();
-        for (repo, stats) in repo_stats.iter() {
-            repos.insert(
-                repo.clone(),
-                serde_json::json!({
-                    "reviews": stats.reviews,
-                    "approved": stats.approved,
-                    "request_changes": stats.request_changes,
-                    "commented": stats.commented,
-                }),
-            );
+        if let Ok(repo_stats) = self.per_repo_stats.lock() {
+            for (repo, stats) in repo_stats.iter() {
+                repos.insert(
+                    repo.clone(),
+                    serde_json::json!({
+                        "reviews": stats.reviews,
+                        "approved": stats.approved,
+                        "request_changes": stats.request_changes,
+                        "commented": stats.commented,
+                    }),
+                );
+            }
         }
 
         serde_json::json!({

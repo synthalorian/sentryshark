@@ -5,6 +5,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn, error, instrument};
 use std::time::Duration;
+use subtle::ConstantTimeEq;
 
 use crate::{AppState, review::{ReviewEngine, CommitRange}, llm::LlmClient};
 use crate::inline_comments::{ReviewVerdict, SeverityLevel, ReviewParser};
@@ -17,7 +18,6 @@ pub struct GitLabWebhook {
     pub project: Project,
     pub object_attributes: Option<MergeRequest>,
     pub merge_request: Option<MergeRequest>,
-    pub build_status: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,10 +71,17 @@ fn verify_gitlab_token(headers: &HeaderMap, expected: &str) -> bool {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     
-    if token.len() != expected.len() {
-        return false;
+    let token_bytes = token.as_bytes();
+    let expected_bytes = expected.as_bytes();
+    let max_len = token_bytes.len().max(expected_bytes.len());
+    let mut result = 1u8;
+    for i in 0..max_len {
+        let a = token_bytes.get(i).copied().unwrap_or(0);
+        let b = expected_bytes.get(i).copied().unwrap_or(0);
+        result &= a.ct_eq(&b).unwrap_u8();
     }
-    token.bytes().zip(expected.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+    let len_eq = (token_bytes.len() == expected_bytes.len()) as u8;
+    (result & len_eq) == 1
 }
 
 pub async fn webhook_handler(
@@ -122,7 +129,7 @@ pub async fn webhook_handler(
     let mr_title = mr.title.clone();
 
     let action = mr.action.as_deref().unwrap_or("");
-    if mr.state != "opened" && action != "open" && action != "update" && action != "merge" {
+    if mr.state != "opened" && action != "open" && action != "update" && action != "reopen" {
         return StatusCode::OK;
     }
 

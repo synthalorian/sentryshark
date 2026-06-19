@@ -11,14 +11,40 @@ pub struct RateLimiter {
     max_requests: u32,
     window: Duration,
     store: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
+    #[allow(dead_code)]
+    cleanup_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
 }
 
 impl RateLimiter {
     pub fn new(max_requests: u32, window_seconds: u64) -> Self {
+        let window = Duration::from_secs(window_seconds);
+        let store: Arc<Mutex<HashMap<String, Vec<Instant>>>> = Arc::new(Mutex::new(HashMap::new()));
+        let store_clone = store.clone();
+        let cleanup_window = window;
+
+        // Only spawn cleanup task if we're inside a Tokio runtime
+        let cleanup_handle: Option<tokio::task::JoinHandle<()>> = if tokio::runtime::Handle::try_current().is_ok() {
+            Some(tokio::spawn(async move {
+                let mut interval = tokio::time::interval(cleanup_window.max(Duration::from_secs(60)));
+                loop {
+                    interval.tick().await;
+                    let now = Instant::now();
+                    let mut store = store_clone.lock().await;
+                    store.retain(|_, timestamps| {
+                        timestamps.retain(|t| now.duration_since(*t) < cleanup_window);
+                        !timestamps.is_empty()
+                    });
+                }
+            }))
+        } else {
+            None
+        };
+
         Self {
             max_requests,
-            window: Duration::from_secs(window_seconds),
-            store: Arc::new(Mutex::new(HashMap::new())),
+            window,
+            store,
+            cleanup_handle: cleanup_handle.map(Arc::new),
         }
     }
 

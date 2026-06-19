@@ -41,7 +41,7 @@ pub async fn dashboard_handler(State(state): State<AppState>) -> Html<String> {
 
     match render_dashboard(&db, refresh).await {
         Ok(html) => Html(html),
-        Err(e) => Html(format!("<h1>Dashboard Error</h1><p>{}</p>", e)),
+        Err(e) => Html(format!("<h1>Dashboard Error</h1><p>{}</p>", escape_html(&e.to_string()))),
     }
 }
 

@@ -114,11 +114,8 @@ fn is_docs_only(diff: &str, patterns: &[String]) -> bool {
             has_files = true;
             let file_path = extract_file_path(line).unwrap_or_default();
             let is_doc = patterns.iter().any(|pat| {
-                if let Some(suffix) = pat.strip_prefix('*') {
-                    file_path.ends_with(suffix)
-                } else {
-                    file_path.contains(pat)
-                }
+                pat.strip_prefix('*')
+                    .map_or_else(|| file_path.contains(pat), |suffix| file_path.ends_with(suffix))
             });
             if !is_doc {
                 all_docs = false;

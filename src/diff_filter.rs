@@ -173,8 +173,16 @@ fn glob_to_regex(pattern: &str) -> String {
     let mut regex = String::new();
     regex.push('^');
     
-    for ch in pattern.chars() {
+    let trailing_slash = pattern.ends_with('/');
+    let pattern_without_trailing_slash = if trailing_slash {
+        &pattern[..pattern.len() - 1]
+    } else {
+        pattern
+    };
+    
+    for ch in pattern_without_trailing_slash.chars() {
         match ch {
+            '\\' => regex.push_str("\\\\"),
             '*' => regex.push_str(".*"),
             '?' => regex.push('.'),
             '.' => regex.push_str("\\."),
@@ -188,7 +196,12 @@ fn glob_to_regex(pattern: &str) -> String {
         }
     }
     
-    regex.push('$');
+    if trailing_slash {
+        regex.push_str("/.*$");
+    } else {
+        regex.push('$');
+    }
+    
     regex
 }
 
@@ -230,7 +243,7 @@ diff --git a/src/main.rs b/src/main.rs
 
         let filtered = filter.filter_diff(diff);
         assert!(!filtered.contains("Cargo.lock"), "Cargo.lock should be filtered out");
-        assert!(filtered.contains("src/main.rs"), "src/main.rs should be kept, got: {}", filtered);
+        assert!(filtered.contains("src/main.rs"), "src/main.rs should be kept, got: {filtered}");
     }
 
     #[test]
@@ -274,7 +287,7 @@ diff --git a/src/app.js b/src/app.js
     #[test]
     fn test_glob_to_regex() {
         assert_eq!(glob_to_regex("*.lock"), "^.*\\.lock$");
-        assert_eq!(glob_to_regex("dist/"), "^dist/$");
+        assert_eq!(glob_to_regex("dist/"), "^dist/.*$");
         assert_eq!(glob_to_regex("Cargo.lock"), "^Cargo\\.lock$");
     }
 
@@ -363,5 +376,11 @@ diff --git a/lib/lib.rs b/lib/lib.rs
         assert!(filtered.contains("src/main.rs"), "src/main.rs should be kept");
         assert!(!filtered.contains("src/generated.rs"), "src/generated.rs should be excluded");
         assert!(!filtered.contains("lib/lib.rs"), "lib/lib.rs should not be included");
+    }
+
+    #[test]
+    fn test_glob_to_regex_escapes_backslash() {
+        // Backslash should be escaped in regex
+        assert_eq!(glob_to_regex(r"path\to\file"), r"^path\\to\\file$");
     }
 }

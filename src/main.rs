@@ -131,7 +131,7 @@ async fn health_check(axum::extract::State(state): axum::extract::State<AppState
 
     Json(HealthStatus {
         status: "healthy".to_string(),
-        version: "1.0.0".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
         database: db_status.to_string(),
         config_loaded: true,
     })
@@ -143,7 +143,7 @@ async fn metrics_handler(
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(
         axum::http::header::CONTENT_TYPE,
-        "text/plain; charset=utf-8".parse().unwrap(),
+        "text/plain; charset=utf-8".parse().expect("valid content-type header"),
     );
 
     let body = state.metrics.render_prometheus().await;

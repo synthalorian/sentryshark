@@ -49,8 +49,13 @@ impl LlmClient {
         temperature: f32,
         review_config: ReviewConfig,
     ) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
         Self {
-            client: reqwest::Client::new(),
+            client,
             base_url,
             model,
             max_tokens,

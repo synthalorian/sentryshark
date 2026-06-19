@@ -27,7 +27,7 @@ pub struct InlineComment {
     pub severity: SeverityLevel,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ReviewVerdict {
     Approve,
     RequestChanges,

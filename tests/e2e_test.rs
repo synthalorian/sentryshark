@@ -20,7 +20,6 @@ use sentryshark::AppState;
 /// End-to-end integration test simulating a real GitHub webhook payload flow.
 /// This test verifies the complete webhook handling pipeline from receipt
 /// through signature verification to job queueing.
-
 fn create_e2e_app() -> Router {
     let config = AppConfig {
         server: sentryshark::config::ServerConfig {
@@ -114,7 +113,10 @@ fn compute_github_signature(secret: &str, body: &str) -> String {
     use sha2::Sha256;
 
     type HmacSha256 = Hmac<Sha256>;
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+    let mut mac = match HmacSha256::new_from_slice(secret.as_bytes()) {
+        Ok(m) => m,
+        Err(_) => panic!("HMAC initialization failed"),
+    };
     mac.update(body.as_bytes());
     let result = mac.finalize();
     let code_bytes = result.into_bytes();

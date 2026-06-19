@@ -1993,6 +1993,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "subtle",
  "tempfile",
  "tokio",
  "tokio-rusqlite",
